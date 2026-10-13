@@ -114,6 +114,8 @@ Select the extension with `PHP_INI_SCAN_DIR=:<repo>/build/ini` (Swoole) or `:<re
 
 ## Known upstream issues
 
+- A local `fclose()` of a stream that fibers wait on is noticed by the poller within one 10 ms slice (it checks `is_resource()` before every `waitEvent()`); all waiters return normally and `waitEvent()` is never called on a dead resource. The poller waits on a dup of the fd (`php://fd/N`, fd found in `/proc/self/fd` by inode on Linux), because closing the original under a pending `waitEvent()` makes the reactor log `failed to delete events ... Bad file descriptor` when the slice ends and there is no API to cancel a pending `waitEvent()` safely (see below). Consequence: the peer sees EOF up to 10 ms later than the `fclose()`; off Linux the warning can appear.
+
 **Swoole 6.3.0RC1: `Coroutine::cancel()` of a coroutine blocked in `System::waitEvent()` segfaults** when the
 event becomes ready in the same loop tick. gdb: `SIGSEGV in swoole::PHPCoroutine::fiber_context_switch_try_notify(from=main_context, to=0x8000000000000000)`
 <- `on_resume` <- `Coroutine::resume` <- `CallbackManager::execute` <- `Reactor::execute_end_callbacks`: a deferred

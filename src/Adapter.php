@@ -15,8 +15,8 @@ use Swoole\Coroutine\System;
  */
 final class Adapter implements \async\Adapter
 {
-    /** Seconds one System::waitEvent() poll lasts; an unwatched poller exits within this time. */
-    private const POLL_SLICE = 0.05;
+    /** Seconds one System::waitEvent() poll lasts; an unwatched poller exits, and a locally closed stream is noticed, within this time. */
+    private const POLL_SLICE = 0.01;
     /** @var array<string, array{waiters: array<int, Channel>}> stream wait groups, key "<resource id>:<r|w>" */
     private array $streams = [];
     private int $nextWaiter = 0;
@@ -209,9 +209,20 @@ final class Adapter implements \async\Adapter
                 $this->streams[$key] = ['waiters' => []];
                 Coroutine::create(function () use ($resource, $mode, $key): void {
                     $event = $mode === 'r' ? \SWOOLE_EVENT_READ : \SWOOLE_EVENT_WRITE;
+                    $watch = $this->dupStream($resource, $mode);
+                    try {
                     while (true) {
+                        if (!\is_resource($resource)) {
+                            // Closed locally: wake everyone normally; their next operation on the resource fails.
+                            $waiters = $this->streams[$key]['waiters'];
+                            unset($this->streams[$key]);
+                            foreach ($waiters as $w) {
+                                $w->push([true, null]);
+                            }
+                            return;
+                        }
                         $t = \microtime(true);
-                        $r = System::waitEvent($resource, $event, self::POLL_SLICE);
+                        $r = System::waitEvent($watch, $event, self::POLL_SLICE);
                         if ($r === false && \microtime(true) - $t >= self::POLL_SLICE * 0.5) {
                             if (!$this->streams[$key]['waiters']) {
                                 unset($this->streams[$key]); // no yield between the check and the unset
@@ -226,6 +237,11 @@ final class Adapter implements \async\Adapter
                         }
                         return;
                     }
+                    } finally {
+                        if ($watch !== $resource) {
+                            \fclose($watch);
+                        }
+                    }
                 });
             }
             $this->streams[$key]['waiters'][$id] = $ch;
@@ -235,6 +251,35 @@ final class Adapter implements \async\Adapter
                 unset($this->streams[$key]['waiters'][$id]); // the poller notices the empty group by itself
             }
         }, $timeout);
+    }
+
+    /** @var array<int, int> resource id => fd number found in /proc/self/fd */
+    private array $fds = [];
+
+    /**
+     * A dup of $resource's fd to hand to waitEvent(): if the caller fclose()s the original while a waitEvent() slice is
+     * pending, the reactor would otherwise log "failed to delete events ... Bad file descriptor" when the slice ends.
+     * PHP has no stream-to-fd API, so on Linux the fd is found in /proc/self/fd by inode (cached per resource id);
+     * elsewhere the resource itself is waited on and that warning can appear.
+     */
+    private function dupStream(mixed $resource, string $mode): mixed
+    {
+        $st = \fstat($resource);
+        $fd = $this->fds[\get_resource_id($resource)] ?? null;
+        if ($fd === null || !\file_exists("/proc/self/fd/$fd") || \stat("/proc/self/fd/$fd")['ino'] !== $st['ino']) {
+            $fd = null;
+            foreach (\is_dir('/proc/self/fd') ? \scandir('/proc/self/fd') : [] as $n) {
+                if (\ctype_digit($n) && \file_exists("/proc/self/fd/$n") && \stat("/proc/self/fd/$n")['ino'] === $st['ino']) {
+                    $fd = (int) $n;
+                    break;
+                }
+            }
+            if ($fd === null) {
+                return $resource;
+            }
+            $this->fds[\get_resource_id($resource)] = $fd;
+        }
+        return \fopen("php://fd/$fd", $mode === 'r' ? 'r' : 'w') ?: $resource;
     }
 
     /**
