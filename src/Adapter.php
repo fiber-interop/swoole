@@ -46,9 +46,21 @@ final class Adapter implements \async\Adapter
                 Coroutine::create($f);
                 \OpenSwoole\Event::wait();
             };
-        // Co\run() enables SWOOLE_HOOK_ALL, which warns on stdout for each curl function when ext-curl is absent.
-        if (!\extension_loaded('curl') && Coroutine::getCid() < 0 && \defined('SWOOLE_HOOK_ALL')) {
-            Coroutine::set(['hook_flags' => \SWOOLE_HOOK_ALL & ~\SWOOLE_HOOK_CURL & ~(\defined('SWOOLE_HOOK_NATIVE_CURL') ? \SWOOLE_HOOK_NATIVE_CURL : 0)]);
+        // Co\run() enables SWOOLE_HOOK_ALL. Two curl hooks are masked out of it:
+        //  - without ext-curl, every curl hook warns on stdout for each curl function;
+        //  - the legacy SWOOLE_HOOK_CURL (in SWOOLE_HOOK_ALL on builds without --enable-swoole-curl) swaps
+        //    CurlHandle for Swoole\Curl\Handler: a TypeError for handles made outside a coroutine and a segfault
+        //    with curl_multi. Only the native hook (SWOOLE_HOOK_NATIVE_CURL, real libcurl) is kept.
+        if (Coroutine::getCid() < 0 && \defined('SWOOLE_HOOK_ALL')) {
+            $native = \defined('SWOOLE_HOOK_NATIVE_CURL') ? \SWOOLE_HOOK_NATIVE_CURL : 0;
+            $legacy = \defined('SWOOLE_HOOK_CURL') ? \SWOOLE_HOOK_CURL : 0;
+            $flags = \SWOOLE_HOOK_ALL & ~$legacy;
+            if (!\extension_loaded('curl')) {
+                $flags &= ~$native;
+            }
+            if ($flags !== \SWOOLE_HOOK_ALL) {
+                Coroutine::set(['hook_flags' => $flags]);
+            }
         }
         // Scope's polyfill keys its stacks on this object (the coroutine's context dies with the coroutine).
         if (\function_exists('fiber_interop\scope\set_execution_key_provider')) {
@@ -105,12 +117,38 @@ final class Adapter implements \async\Adapter
         return $this->spawn($f, true);
     }
 
+    /**
+     * Swoole gives each coroutine its own output buffers, so output from tasks would bypass an ob_start() the
+     * caller of the outermost run() opened. While that caller has a buffer open, each coroutine started here
+     * collects its output (chunk size 1 keeps the order across coroutines) and run() echoes it on return.
+     */
+    private ?string $output = null;
+
+    private function captureOutput(): bool
+    {
+        return $this->output !== null && \ob_start(function (string $buffer): string {
+            $this->output .= $buffer;
+            return '';
+        }, 1);
+    }
+
+    private static function releaseOutput(bool $captured): void
+    {
+        while ($captured && \ob_get_level() > 0) {
+            \ob_end_flush();
+        }
+    }
+
     private function spawn(\Closure $f, bool $service): Task
     {
         $task = new Task();
         $service || $this->live++;
+        if (Coroutine::getCid() < 0 && \ob_get_level() > 0) {
+            $this->output ??= ''; // started from {main}: echoed when the wait() that drives it returns
+        }
         $cid = Coroutine::create(function () use ($f, $task, $service): void {
             self::activate();
+            $captured = $this->captureOutput();
             $cid = Coroutine::getCid();
             $service && $this->services[$cid] = $cid;
             try {
@@ -133,6 +171,7 @@ final class Adapter implements \async\Adapter
                 if (!$service && --$this->live === 0 && $this->wrapDepth > 0) {
                     $this->cancelServices();
                 }
+                self::releaseOutput($captured);
             }
         });
         return $task;
@@ -310,14 +349,24 @@ final class Adapter implements \async\Adapter
         } else {
             $out = null;
             $this->wrapDepth++;
+            $this->output ??= \ob_get_level() > 0 ? '' : null;
             try {
                 ($this->runner)(function () use ($run, &$out): void {
-                    $out = $run();
-                    $this->live === 0 && $this->cancelServices();
+                    $captured = $this->captureOutput();
+                    try {
+                        $out = $run();
+                        $this->live === 0 && $this->cancelServices();
+                    } finally {
+                        self::releaseOutput($captured);
+                    }
                 });
             } finally {
                 $this->wrapDepth--;
                 self::activate();
+                if ($this->output !== null) {
+                    echo $this->output;
+                    $this->output = null;
+                }
             }
             [$ok, $value] = $out;
         }

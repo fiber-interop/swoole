@@ -209,4 +209,43 @@ final class AdapterTest extends TestCase
         $this->assertCount(2, $woke);
         $this->assertLessThan(0.1, max($woke));
     }
+
+    /** Services are driven while a run() is active: awaiting what only a service resolves must not end the loop. */
+    public function testAwaitResolvedOnlyByService(): void
+    {
+        $t = \microtime(true);
+        $result = \async\run(function () {
+            $timer = new \async\Deferred();
+            \async\service(function () use ($timer) {
+                \async\sleep(0.02);
+                $timer->settle(true, 'slept');
+                \async\sleep(30); // a sleeping service must not keep run() alive
+            });
+            [$a, $b] = \stream_socket_pair(\STREAM_PF_UNIX, \STREAM_SOCK_STREAM, \STREAM_IPPROTO_IP);
+            $io = new \async\Deferred();
+            \async\service(function () use ($a, $io) {
+                \async\readable($a, 5.0);
+                $io->settle(true, \fread($a, 10));
+            });
+            \async\service(function () use ($b) {
+                \async\sleep(0.02);
+                \fwrite($b, 'ping');
+            });
+            return [\async\await($timer), \async\await($io)];
+        });
+        $this->assertSame(['slept', 'ping'], $result);
+        $this->assertLessThan(5.0, \microtime(true) - $t);
+    }
+
+    /** Swoole isolates output buffers per coroutine; task output must still reach the caller's ob_start(). */
+    public function testTaskOutputReachesCallersOutputBuffer(): void
+    {
+        \ob_start();
+        run(function () {
+            echo 'A';
+            await(go(function () { sleep(0.01); echo 'B'; }));
+            echo 'C';
+        });
+        $this->assertSame('ABC', \ob_get_clean());
+    }
 }

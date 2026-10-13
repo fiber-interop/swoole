@@ -11,6 +11,8 @@ final class ConformanceTest extends TestCase
     public function testAllExamplesPass(): void
     {
         $this->assertTrue(extension_loaded('swoole') || extension_loaded('openswoole'), 'run with the extension loaded');
+        $probe = shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg('echo (int) (extension_loaded("swoole") || extension_loaded("openswoole"));'));
+        $this->assertSame('1', $probe, 'the conformance runner spawns plain php, which lacks the extension: load it from an ini (PHP_INI_SCAN_DIR=:build/ini), not with -d');
         $cmd = [PHP_BINARY, __DIR__ . '/../vendor/fiber-interop/api/bin/fiber-interop-conformance', __DIR__ . '/bootstrap.php'];
         $p = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
         $out = stream_get_contents($pipes[1]);
