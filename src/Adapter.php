@@ -304,6 +304,9 @@ final class Adapter implements \async\Adapter
     private function dupStream(mixed $resource, string $mode): mixed
     {
         $st = \fstat($resource);
+        if ($st === false) {
+            return $resource; // no stat for this stream (e.g. pg_socket()): wait on the resource itself
+        }
         $fd = $this->fds[\get_resource_id($resource)] ?? null;
         if ($fd === null || !\file_exists("/proc/self/fd/$fd") || \stat("/proc/self/fd/$fd")['ino'] !== $st['ino']) {
             $fd = null;
