@@ -58,9 +58,9 @@ final class Adapter implements \async\Adapter
             if (!\extension_loaded('curl')) {
                 $flags &= ~$native;
             }
-            if ($flags !== \SWOOLE_HOOK_ALL) {
-                Coroutine::set(['hook_flags' => $flags]);
-            }
+            // Always set explicitly: when nothing is masked, Co\run() on Swoole 6.3 leaves the first run
+            // unhooked if hook_flags was never set (later runs are hooked), so the first run() would block.
+            Coroutine::set(['hook_flags' => $flags]);
         }
         // Scope's polyfill keys its stacks on this object (the coroutine's context dies with the coroutine).
         if (\function_exists('fiber_interop\scope\set_execution_key_provider')) {
