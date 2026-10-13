@@ -82,4 +82,31 @@ final class AdapterTest extends TestCase
         });
         $this->assertSame([true, true], $res);
     }
+
+    public function testCoroutineContextIsStableAndReleasedWithTheCoroutine(): void
+    {
+        $ref = null;
+        run(function () use (&$ref) {
+            $t = go(function () use (&$ref) {
+                $c = \Swoole\Coroutine::getContext();
+                sleep(0.005);
+                $same = $c === \Swoole\Coroutine::getContext();
+                $ref = \WeakReference::create($c);
+                return $same;
+            });
+            $this->assertTrue(await($t));
+        });
+        $this->assertNotNull($ref);
+        $this->assertNull($ref->get(), 'context is released when the coroutine ends');
+    }
+
+    public function testScopeStackIsDroppedWhenCoroutineEnds(): void
+    {
+        $a = new \Scope();
+        $inside = run(function () use ($a) {
+            return await($a->run(fn() => go(fn() => \Scope::getCurrent() === $a)));
+        });
+        $this->assertTrue($inside);
+        $this->assertSame(\Scope::getRootScope(), \Scope::getCurrent());
+    }
 }

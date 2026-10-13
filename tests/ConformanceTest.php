@@ -8,9 +8,6 @@ use PHPUnit\Framework\TestCase;
 
 final class ConformanceTest extends TestCase
 {
-    /** Examples that cannot pass on Swoole; see README "Known limitations". */
-    private const KNOWN = ['04-timeout-leaves-task-running'];
-
     public function testAllExamplesPass(): void
     {
         $this->assertTrue(extension_loaded('swoole') || extension_loaded('openswoole'), 'run with the extension loaded');
@@ -19,7 +16,7 @@ final class ConformanceTest extends TestCase
         $out = stream_get_contents($pipes[1]);
         $code = proc_close($p);
         preg_match_all('/^FAIL (\S+)/m', $out, $m);
-        $this->assertSame([], array_values(array_diff($m[1], self::KNOWN)), $out);
+        $this->assertSame([], $m[1], $out);
         if (!$m[1]) {
             $this->assertSame(0, $code, $out);
         }

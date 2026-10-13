@@ -50,19 +50,20 @@ scheduling here; `Fiber::suspend()` is not involved.
 
 ## Scope
 
-`Fiber::getCurrent()` is null in every coroutine, so the userland `Scope` polyfill (one {main} stack) would
-mix coroutines. The adapter swaps the polyfill's private `Scope::$main` stack (via a bound Closure) at every
-switch it controls: coroutine start, every adapter wait, and return from `go()`/`Co\run()`. Examples 13 and
-14 pass. Limits: code that switches coroutines with raw Swoole calls (`Channel`, `Co::sleep` directly) while
-inside `Scope::run()` is not tracked; with the `ext-scope` C extension nothing is swapped (untested).
-Proper fix: the polyfill should key its stack on a pluggable "execution key" instead of `Fiber::getCurrent()`:
+`Fiber::getCurrent()` is null in every coroutine, so the userland `Scope` polyfill would share one {main} stack
+between coroutines. The adapter registers an execution key provider with the polyfill:
 
 ```php
-Scope::setExecutionKeyProvider(?callable $f); // returns int|object identifying the current execution unit
-// adapter registers: fn() => \Swoole\Coroutine::getCid() >= 0 ? \Swoole\Coroutine::getCid() : null
+\fiber_interop\scope\set_execution_key_provider(fn() => Coroutine::getCid() > 0 ? Coroutine::getContext() : null);
 ```
 
-(or key on `Fiber::getCurrent() ?? Coroutine::getCid()` when Swoole is loaded, cleaning up when a coroutine ends).
+so every coroutine gets its own `Scope` stack, keyed on its `Coroutine::getContext()` (the same object for the
+coroutine's whole life; the WeakMap entry vanishes when the coroutine ends). This covers raw Swoole switches too
+(`Channel`, `Co::sleep` directly), not only the adapter's waits. `go()` propagates the creator's scope into the
+task through `$scope->run()`. Examples 13 and 14 pass.
+
+With the `ext-scope` C extension the provider function is a no-op, and the extension cannot see coroutine
+switches (they are not fiber switches): use the polyfill with Swoole.
 
 ## OpenSwoole
 
@@ -73,6 +74,5 @@ would need `class_alias`es; expect differences in `waitEvent` semantics.
 
 ## Tests
 
-`vendor/bin/phpunit` (with the extension loaded): `ConformanceTest` runs the api examples (04 listed as a known
-limitation), `AdapterTest` covers repeatable awaits, concurrent awaiters, timeouts, stream multiplexing and
+`vendor/bin/phpunit` (with the extension loaded): `ConformanceTest` runs the api examples (all 17 examples), `AdapterTest` covers repeatable awaits, concurrent awaiters, timeouts, stream multiplexing and
 per-coroutine scope.

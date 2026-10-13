@@ -25,15 +25,19 @@ final class Adapter implements \async\Adapter
         if (!\extension_loaded('curl') && Coroutine::getCid() < 0 && \defined('SWOOLE_HOOK_ALL')) {
             Coroutine::set(['hook_flags' => \SWOOLE_HOOK_ALL & ~\SWOOLE_HOOK_CURL & ~(\defined('SWOOLE_HOOK_NATIVE_CURL') ? \SWOOLE_HOOK_NATIVE_CURL : 0)]);
         }
+        // Scope's polyfill keys its stacks on this object (the coroutine's context dies with the coroutine).
+        if (\function_exists('fiber_interop\scope\set_execution_key_provider')) {
+            \fiber_interop\scope\set_execution_key_provider(
+                static fn(): ?object => Coroutine::getCid() > 0 ? Coroutine::getContext() : null,
+            );
+        }
     }
 
     public function go(\Closure $f): object
     {
         $task = new Task();
         $scope = \Scope::getCurrent();
-        $parent = $this->saveScope();
         Coroutine::create(function () use ($f, $task, $scope): void {
-            $this->loadScope([]);
             try {
                 $task->settle(true, $scope->run($f));
             } catch (\Throwable $e) {
@@ -44,7 +48,6 @@ final class Adapter implements \async\Adapter
                 }
             }
         });
-        $this->loadScope($parent);
         return $task;
     }
 
@@ -140,9 +143,7 @@ final class Adapter implements \async\Adapter
      */
     private function wait(\Closure $body, float $timeout, ?float $sleep = null): mixed
     {
-        $saved = $this->saveScope();
-        $run = function () use ($body, $timeout, $sleep, $saved): array {
-            $this->loadScope($saved);
+        $run = function () use ($body, $timeout, $sleep): array {
             try {
                 if ($sleep !== null) {
                     Coroutine::sleep(\max(0.001, $sleep));
@@ -153,7 +154,6 @@ final class Adapter implements \async\Adapter
             } catch (\Throwable $e) {
                 $r = [false, $e];
             }
-            $this->loadScope($saved);
             return $r;
         };
         if (Coroutine::getCid() >= 0) {
@@ -163,32 +163,11 @@ final class Adapter implements \async\Adapter
             \Swoole\Coroutine\run(static function () use ($run, &$out): void {
                 $out = $run();
             });
-            $this->loadScope($saved);
             [$ok, $value] = $out;
         }
         if (!$ok) {
             throw $value;
         }
         return $value;
-    }
-
-    /**
-     * Scope's polyfill keeps one {main} stack shared by every coroutine (Fiber::getCurrent() is null
-     * in all of them), so the adapter swaps that stack at each coroutine switch it controls.
-     * Without the polyfill (ext-scope) this is a no-op.
-     */
-    private function saveScope(): ?array
-    {
-        if (!\defined('fiber_interop\scope\IS_POLYFILL') || !\constant('fiber_interop\scope\IS_POLYFILL')) {
-            return null;
-        }
-        return \Closure::bind(static fn() => \Scope::$main, null, \Scope::class)();
-    }
-
-    private function loadScope(?array $stack): void
-    {
-        if ($stack !== null) {
-            \Closure::bind(static function () use ($stack): void { \Scope::$main = $stack; }, null, \Scope::class)();
-        }
     }
 }
