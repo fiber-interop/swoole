@@ -74,9 +74,30 @@ task through `$scope->run()`. Examples 13 and 14 pass.
 With the `ext-scope` C extension the provider function is a no-op, and the extension cannot see coroutine
 switches (they are not fiber switches): use the polyfill with Swoole.
 
+## Scope state
+
+`$_GET`, `$_POST`, `$_COOKIE` and `$_FILES` are per scope (scope 0.2). The polyfill swaps the live superglobals
+when `fiber_interop\scope\activate()` is called. Swoole has no userland coroutine-switch hook, so the adapter
+calls it at the points where it regains control: first thing in every coroutine it starts (`go()`/`service()`),
+after every wait returns (`Adapter::pop()`, which `await`, `sleep`, `readable` and `writable` all end in), and after the
+outermost `run()` returns to {main}. It is a single comparison when the scope is unchanged.
+
+Probes (`php probes/<name>.php`, exit 0 and `ok` on success; same results on Swoole 6.3 and OpenSwoole 26.2):
+
+- `scope-api.php` passes: two scopes interleaving through `async\sleep()` keep their own `$_GET`; the root value is back after `run()`.
+- `scope-raw-fiber.php` passes: a plain `Fiber` inside a scope sees its creator's `$_GET` (the polyfill's "most recently current" fallback).
+- `scope-loop.php` FAILS, as expected: with `Coroutine::create` + a native sleep (no `async\` call), a coroutine that
+  Swoole itself resumes sees the superglobals of whatever scope was active last (here the root, `[]`), not its own.
+
+What was checked for a hook: `Coroutine::set()` options, `Coroutine::defer()` (runs at coroutine exit only) and the
+`Coroutine` method list on both extensions. The C++ core has `Coroutine::set_on_yield/set_on_resume`, but they are
+C-level and not exposed to PHP, so no PHP code can run on a switch Swoole makes itself. Swoole applications use
+`Co::getContext()` for per-request state for this reason; keep doing that for code that waits on native primitives.
+Closing the gap needs engine-level support (the native `ext-scope`), which must then follow coroutine switches too.
+
 ## OpenSwoole
 
-Tested with OpenSwoole 26.2.0 (built from PECL on PHP 8.5.11 NTS): phpunit (11 tests) and all 20 conformance
+Tested with OpenSwoole 26.2.0 (built from PECL on PHP 8.5.11 NTS): phpunit (11 tests) and all 21 conformance
 examples pass, same as on Swoole 6.3.0RC1. One code path serves both; the differences found:
 
 - OpenSwoole aliases `Swoole\Coroutine`, `Coroutine\Channel`, `Coroutine\System` and the `SWOOLE_*` constants,
@@ -93,5 +114,5 @@ Select the extension with `PHP_INI_SCAN_DIR=:<repo>/build/ini` (Swoole) or `:<re
 
 ## Tests
 
-`vendor/bin/phpunit` (with the extension loaded): `ConformanceTest` runs the api examples (all 20 examples), `AdapterTest` covers repeatable awaits, concurrent awaiters, timeouts, stream multiplexing,
+`vendor/bin/phpunit` (with the extension loaded): `ConformanceTest` runs the api examples (all 21 examples), `AdapterTest` covers repeatable awaits, concurrent awaiters, timeouts, stream multiplexing,
 service cancellation, nested `run()` in two coroutines and per-coroutine scope.

@@ -134,4 +134,59 @@ final class AdapterTest extends TestCase
         $this->assertTrue($inside);
         $this->assertSame(\Scope::getRootScope(), \Scope::getCurrent());
     }
+
+    public function testScopeActivatedAtTaskStart(): void
+    {
+        $this->assertSame('x', run(function () {
+            $_GET = ['v' => 'root'];
+            $scope = new \Scope();
+            $scope->run(function () { $_GET = ['v' => 'x']; });
+            // A task started in $scope must see $scope's $_GET from its first statement, though root is active.
+            return await($scope->run(fn() => go(fn() => $_GET['v'])));
+        }));
+    }
+
+    public function testScopeActivatedAfterPop(): void
+    {
+        $seen = run(function () {
+            $out = [];
+            $tasks = [];
+            foreach (['a', 'b'] as $n) {
+                $tasks[] = (new \Scope())->run(function () use ($n, &$out) { return go(function () use ($n, &$out) {
+                    $_GET = ['v' => $n];
+                    sleep($n === 'a' ? 0.01 : 0.015);
+                    $out[$n] = $_GET['v'];
+                    await(go(fn() => sleep(0.005)));
+                    $out[$n . '2'] = $_GET['v'];
+                }); });
+            }
+            await_all($tasks);
+            return $out;
+        });
+        $this->assertSame(['a' => 'a', 'b' => 'b', 'a2' => 'a', 'b2' => 'b'], $seen + []);
+    }
+
+    public function testScopeActivatedAfterReturnToMain(): void
+    {
+        $root = $_GET;
+        run(function () {
+            (new \Scope())->run(fn() => await(go(function () { $_GET = ['v' => 'inner']; sleep(0.005); })));
+        });
+        $this->assertSame($root, $_GET);
+    }
+
+    public function testNoSwapWhenScopeUnchanged(): void
+    {
+        $same = run(function () {
+            $_GET = ['v' => 1];
+            $active = fn() => (new \ReflectionProperty(\Scope::class, 'active'))->getValue();
+            $before = $active();
+            sleep(0.005);
+            await(go(fn() => 1));
+            $_GET['w'] = 2; // in-place edit survives only if no swap reloaded a saved copy
+            sleep(0.005);
+            return $active() === $before && $_GET === ['v' => 1, 'w' => 2];
+        });
+        $this->assertTrue($same);
+    }
 }

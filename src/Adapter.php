@@ -69,6 +69,7 @@ final class Adapter implements \async\Adapter
             $r = $ch->pop($timeout === \PHP_FLOAT_MAX ? -1 : \max(0.0001, $timeout));
         } finally {
             unset(self::$waiting[$id]);
+            self::activate();
         }
         if ($r === false) {
             if ($ch->errCode !== \SWOOLE_CHANNEL_TIMEOUT) {
@@ -77,6 +78,17 @@ final class Adapter implements \async\Adapter
             return null;
         }
         return $r;
+    }
+
+    /**
+     * Swoole has no userland coroutine-switch hook, so scope superglobals are re-activated at the points where
+     * this adapter regains control: coroutine start, after every wait, after the outermost run returns.
+     */
+    private static function activate(): void
+    {
+        if (\function_exists('fiber_interop\scope\activate')) {
+            \fiber_interop\scope\activate();
+        }
     }
 
     public function go(\Closure $f): object
@@ -96,6 +108,7 @@ final class Adapter implements \async\Adapter
         $task = new Task();
         $service || $this->live++;
         $cid = Coroutine::create(function () use ($f, $task, $service): void {
+            self::activate();
             $cid = Coroutine::getCid();
             $service && $this->services[$cid] = $cid;
             try {
@@ -254,6 +267,7 @@ final class Adapter implements \async\Adapter
                 });
             } finally {
                 $this->wrapDepth--;
+                self::activate();
             }
             [$ok, $value] = $out;
         }
