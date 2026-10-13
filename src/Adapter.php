@@ -15,7 +15,9 @@ use Swoole\Coroutine\System;
  */
 final class Adapter implements \async\Adapter
 {
-    /** @var array<string, array{cid: int, waiters: array<int, Channel>}> stream wait groups, key "<resource id>:<r|w>" */
+    /** Seconds one System::waitEvent() poll lasts; an unwatched poller exits within this time. */
+    private const POLL_SLICE = 0.05;
+    /** @var array<string, array{waiters: array<int, Channel>}> stream wait groups, key "<resource id>:<r|w>" */
     private array $streams = [];
     private int $nextWaiter = 0;
     /** @var array<int, int> cids of service() coroutines */
@@ -66,7 +68,7 @@ final class Adapter implements \async\Adapter
         $id = \spl_object_id($ch);
         self::$waiting[$id] = $ch;
         try {
-            $r = $ch->pop($timeout === \PHP_FLOAT_MAX ? -1 : \max(0.0001, $timeout));
+            $r = $ch->pop($timeout === \PHP_FLOAT_MAX ? -1 : \max(0.001, $timeout));
         } finally {
             unset(self::$waiting[$id]);
             self::activate();
@@ -192,8 +194,10 @@ final class Adapter implements \async\Adapter
 
     /**
      * System::waitEvent() allows one waiter per fd and mode, so the first waiter starts a poller
-     * coroutine and every waiter (it included) waits on a private channel. When the last waiter
-     * leaves by timeout the poller is cancelled.
+     * coroutine and every waiter (it included) waits on a private channel. The poller is never cancelled:
+     * Coroutine::cancel() on a coroutine whose event is becoming ready crashes Swoole 6.3.0RC1 (see README,
+     * "Known upstream issues"). It polls in short slices instead and exits by itself at the first slice
+     * boundary where nobody waits. It holds $resource, so the resource id cannot be reused meanwhile.
      */
     private function waitStream(mixed $resource, string $mode, float $timeout): void
     {
@@ -202,16 +206,25 @@ final class Adapter implements \async\Adapter
             $ch = new Channel(1);
             $id = $this->nextWaiter++;
             if (!isset($this->streams[$key])) {
-                $this->streams[$key] = ['cid' => 0, 'waiters' => []];
-                $this->streams[$key]['cid'] = Coroutine::create(function () use ($resource, $mode, $key): void {
-                    $r = System::waitEvent($resource, $mode === 'r' ? \SWOOLE_EVENT_READ : \SWOOLE_EVENT_WRITE, -1);
-                    if (($this->streams[$key]['cid'] ?? null) !== Coroutine::getCid()) {
-                        return; // cancelled: the last waiter timed out
-                    }
-                    $waiters = $this->streams[$key]['waiters'];
-                    unset($this->streams[$key]);
-                    foreach ($waiters as $w) {
-                        $w->push($r === false ? [false, new \RuntimeException('waitEvent failed' . (\function_exists('swoole_strerror') ? ': ' . \swoole_strerror(\swoole_last_error()) : ''))] : [true, null]);
+                $this->streams[$key] = ['waiters' => []];
+                Coroutine::create(function () use ($resource, $mode, $key): void {
+                    $event = $mode === 'r' ? \SWOOLE_EVENT_READ : \SWOOLE_EVENT_WRITE;
+                    while (true) {
+                        $t = \microtime(true);
+                        $r = System::waitEvent($resource, $event, self::POLL_SLICE);
+                        if ($r === false && \microtime(true) - $t >= self::POLL_SLICE * 0.5) {
+                            if (!$this->streams[$key]['waiters']) {
+                                unset($this->streams[$key]); // no yield between the check and the unset
+                                return;
+                            }
+                            continue; // slice elapsed, waiters remain
+                        }
+                        $waiters = $this->streams[$key]['waiters'];
+                        unset($this->streams[$key]);
+                        foreach ($waiters as $w) {
+                            $w->push($r === false ? [false, new \RuntimeException('waitEvent failed' . (\function_exists('swoole_strerror') ? ': ' . \swoole_strerror(\swoole_last_error()) : ''))] : [true, null]);
+                        }
+                        return;
                     }
                 });
             }
@@ -219,15 +232,7 @@ final class Adapter implements \async\Adapter
             try {
                 return self::pop($ch, $timeout);
             } finally {
-                // left by timeout or cancellation: the last waiter out stops the poller
-                if (isset($this->streams[$key]['waiters'][$id])) {
-                    unset($this->streams[$key]['waiters'][$id]);
-                    if (!$this->streams[$key]['waiters']) {
-                        $cid = $this->streams[$key]['cid'];
-                        unset($this->streams[$key]);
-                        Coroutine::cancel($cid);
-                    }
-                }
+                unset($this->streams[$key]['waiters'][$id]); // the poller notices the empty group by itself
             }
         }, $timeout);
     }

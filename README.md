@@ -112,6 +112,23 @@ examples pass, same as on Swoole 6.3.0RC1. One code path serves both; the differ
 
 Select the extension with `PHP_INI_SCAN_DIR=:<repo>/build/ini` (Swoole) or `:<repo>/build/ini-openswoole`; never load both.
 
+## Known upstream issues
+
+**Swoole 6.3.0RC1: `Coroutine::cancel()` of a coroutine blocked in `System::waitEvent()` segfaults** when the
+event becomes ready in the same loop tick. gdb: `SIGSEGV in swoole::PHPCoroutine::fiber_context_switch_try_notify(from=main_context, to=0x8000000000000000)`
+<- `on_resume` <- `Coroutine::resume` <- `CallbackManager::execute` <- `Reactor::execute_end_callbacks`: a deferred
+resume runs on a stale coroutine. Found by the api stress tier (`ReadinessTest::testReadersContendingOnOneStream`,
+exit 11 at 100+ iterations); OpenSwoole 26.2.0 is not affected. Standalone reproducer, no adapter code, crashes
+within seconds: `php tests/upstream/swoole-cancel-waitevent-segfault.php [seconds]` (exit 139 = reproduced).
+
+The adapter never cancels a stream poller. The poller polls `waitEvent()` in 50 ms slices, a late waiter joins
+the running poller, and the poller exits by itself at the first slice boundary with no waiters (it holds the
+resource, so the resource id cannot be reused meanwhile). The cost is an idle poller living up to 50 ms after the
+last waiter left.
+
+**OpenSwoole: `Timer::add() (ERRNO 505): msec value[0] is invalid`** for sub-millisecond timeouts. Swoole clamps
+these; the adapter now clamps every channel timeout and sleep to 1 ms itself on both extensions.
+
 ## Tests
 
 `vendor/bin/phpunit` (with the extension loaded): `ConformanceTest` runs the api examples (all 21 examples), `AdapterTest` covers repeatable awaits, concurrent awaiters, timeouts, stream multiplexing,
