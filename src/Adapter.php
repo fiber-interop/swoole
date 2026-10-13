@@ -26,8 +26,24 @@ final class Adapter implements \async\Adapter
     /** @var array<int, Channel> channels with a blocked consumer, closed before an unhandled error ends the process */
     private static array $waiting = [];
 
+    /**
+     * Swoole: Co\run(). OpenSwoole has no Co\run function, and its Coroutine::run() refuses to start (and
+     * segfaults) once a coroutine was created outside one, which go() does before the first await. There the
+     * runner is create() + Event::wait(), with the hook flags Coroutine::run() would have set.
+     */
+    private \Closure $runner;
+
     public function __construct()
     {
+        $this->runner = \function_exists('Swoole\Coroutine\run')
+            ? \Closure::fromCallable('Swoole\Coroutine\run')
+            : static function (callable $f): void {
+                if (!(Coroutine::getOptions()['hook_flags'] ?? 0)) {
+                    Coroutine::set(['hook_flags' => \SWOOLE_HOOK_ALL]);
+                }
+                Coroutine::create($f);
+                \OpenSwoole\Event::wait();
+            };
         // Co\run() enables SWOOLE_HOOK_ALL, which warns on stdout for each curl function when ext-curl is absent.
         if (!\extension_loaded('curl') && Coroutine::getCid() < 0 && \defined('SWOOLE_HOOK_ALL')) {
             Coroutine::set(['hook_flags' => \SWOOLE_HOOK_ALL & ~\SWOOLE_HOOK_CURL & ~(\defined('SWOOLE_HOOK_NATIVE_CURL') ? \SWOOLE_HOOK_NATIVE_CURL : 0)]);
@@ -88,7 +104,7 @@ final class Adapter implements \async\Adapter
                 $task->settle(false, $e);
             } catch (\Throwable $e) {
                 $task->settle(false, $e);
-                Coroutine::sleep(0.001); // give an awaiter one tick to claim the failure
+                self::pop(new Channel(1), 0.001); // give an awaiter one tick to claim the failure
                 if (!$task->handled) {
                     // Swoole reports it as a fatal error: stderr and non-zero exit. Wake blocked
                     // consumers first so no Channel is destroyed with a waiter (a stdout warning).
@@ -182,7 +198,7 @@ final class Adapter implements \async\Adapter
                     $waiters = $this->streams[$key]['waiters'];
                     unset($this->streams[$key]);
                     foreach ($waiters as $w) {
-                        $w->push($r === false ? [false, new \RuntimeException('waitEvent failed: ' . \swoole_strerror(\swoole_last_error()))] : [true, null]);
+                        $w->push($r === false ? [false, new \RuntimeException('waitEvent failed' . (\function_exists('swoole_strerror') ? ': ' . \swoole_strerror(\swoole_last_error()) : ''))] : [true, null]);
                     }
                 });
             }
@@ -215,9 +231,8 @@ final class Adapter implements \async\Adapter
         $run = function () use ($body, $timeout, $sleep): array {
             try {
                 if ($sleep !== null) {
-                    if (Coroutine::sleep(\max(0.001, $sleep)) === false) {
-                        throw new Cancelled('Cancelled');
-                    }
+                    // Not Coroutine::sleep(): OpenSwoole's takes int seconds. A pop that times out is a float sleep.
+                    self::pop(new Channel(1), \max(0.001, $sleep));
                     $r = [true, null];
                 } else {
                     $r = $body() ?? [false, new Timeout(\sprintf('Timed out after %.3fs', $timeout))];
@@ -233,7 +248,7 @@ final class Adapter implements \async\Adapter
             $out = null;
             $this->wrapDepth++;
             try {
-                \Swoole\Coroutine\run(function () use ($run, &$out): void {
+                ($this->runner)(function () use ($run, &$out): void {
                     $out = $run();
                     $this->live === 0 && $this->cancelServices();
                 });

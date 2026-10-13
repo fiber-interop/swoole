@@ -10,7 +10,7 @@ unchanged for Swoole users.
 composer require fiber-interop/swoole
 ```
 
-Requires `ext-swoole` 6.x (developed against 6.3.0RC1 on PHP 8.5 NTS) or `ext-openswoole`. Composer cannot
+Requires `ext-swoole` 6.x (developed against 6.3.0RC1 on PHP 8.5 NTS) or `ext-openswoole` (tested 26.2.0). Composer cannot
 express "either extension", so neither is hard-required; `src/register.php` registers the adapter only when
 one of them is loaded. Tests must run with the extension loaded, e.g.
 `PHP_INI_SCAN_DIR=:/path/to/dir-with-swoole.ini vendor/bin/phpunit` (the conformance runner spawns plain
@@ -76,10 +76,20 @@ switches (they are not fiber switches): use the polyfill with Swoole.
 
 ## OpenSwoole
 
-Not tested (not installable here). The adapter uses `Swoole\Coroutine`, `Coroutine\Channel`,
-`Coroutine\System::waitEvent`, `Coroutine\run`, `Coroutine::cancel`, `swoole_strerror`; OpenSwoole 22+ provides
-these under `OpenSwoole\...` and, with its short-name/alias settings, `Swoole\...`. Without aliases the adapter
-would need `class_alias`es; expect differences in `waitEvent` semantics.
+Tested with OpenSwoole 26.2.0 (built from PECL on PHP 8.5.11 NTS): phpunit (11 tests) and all 20 conformance
+examples pass, same as on Swoole 6.3.0RC1. One code path serves both; the differences found:
+
+- OpenSwoole aliases `Swoole\Coroutine`, `Coroutine\Channel`, `Coroutine\System` and the `SWOOLE_*` constants,
+  so the class names need no mapping. It has no `Co\run()`/`Swoole\Coroutine\run()` function and no `swoole_strerror()`.
+- `Coroutine::sleep()` takes whole seconds only (a float is a `TypeError`). The adapter sleeps with a timed
+  `Channel::pop()` instead.
+- `Coroutine::run()` refuses to start (and segfaults in 26.2.0) when a coroutine was already created outside
+  one, which `go()` before the first `await()` does. On OpenSwoole the adapter therefore starts its loop with
+  `Coroutine::create()` + `Event::wait()`, setting `hook_flags` to `SWOOLE_HOOK_ALL` as `run()` would. The
+  runner is picked once in the constructor.
+- `System::waitEvent` behaves the same (stream examples 11 and 12 pass).
+
+Select the extension with `PHP_INI_SCAN_DIR=:<repo>/build/ini` (Swoole) or `:<repo>/build/ini-openswoole`; never load both.
 
 ## Tests
 
