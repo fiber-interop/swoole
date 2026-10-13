@@ -1,0 +1,31 @@
+{
+    "name": "fiber-interop/swoole",
+    "description": "Swoole coroutine adapter for fiber-interop/api: go, await, sleep, readable, writable on Swoole coroutines.",
+    "type": "library",
+    "license": "MIT",
+    "require": {
+        "php": "^8.1",
+        "fiber-interop/api": "*",
+        "fiber-interop/scope": "*"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^10.5 || ^11"
+    },
+    "suggest": {
+        "ext-swoole": "Swoole 6.x (required, or ext-openswoole; Composer cannot express the either-or, so neither is hard-required)"
+    },
+    "repositories": [
+        { "type": "path", "url": "../api" },
+        { "type": "path", "url": "../scope" }
+    ],
+    "minimum-stability": "dev",
+    "prefer-stable": true,
+    "autoload": {
+        "psr-4": { "FiberInterop\\Swoole\\": "src/" },
+        "files": ["src/register.php"]
+    },
+    "autoload-dev": {
+        "psr-4": { "FiberInterop\\Swoole\\Tests\\": "tests/" }
+    },
+    "config": { "allow-plugins": {} }
+}
