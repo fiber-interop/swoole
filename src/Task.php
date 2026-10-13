@@ -40,8 +40,7 @@ final class Task
         }
         $ch = new Channel(1);
         $this->onSettle(static fn(bool $ok, mixed $v) => $ch->push([$ok, $v]));
-        $r = $ch->pop($timeout === \PHP_FLOAT_MAX ? -1 : \max(0.0001, $timeout));
-        return $r === false ? null : $r;
+        return Adapter::pop($ch, $timeout);
     }
 
     public function then(?callable $onFulfilled = null, ?callable $onRejected = null): void

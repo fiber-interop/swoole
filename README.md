@@ -26,19 +26,28 @@ PHP 8.5 (`phpize && ./configure && make`).
 | `await(thenable)` | `then()` + channel, `$done` guard, non-Throwable rejection -> `async\RejectedException`, exceptions rethrown unchanged |
 | `sleep()` | `Coroutine::sleep()` (clamped to Swoole's 1 ms minimum) |
 | `readable()/writable()` | `System::waitEvent()`; it allows one waiter per fd and mode (a second gets `EEXIST`), so the adapter runs one poller coroutine per fd+mode and fans out to per-waiter channels; the poller is cancelled when the last waiter times out |
+| `service($f)` | `Coroutine::create()` tracked as a service; cancelled with `Coroutine::cancel()` when the outermost `run()` returns |
 | unawaited failure | after one tick without an awaiter the exception is rethrown in the coroutine; Swoole reports it as a fatal error (stderr, non-zero exit) |
 
-## {main} semantics
+## run(), the scheduler and services
 
-Swoole needs a scheduler. `go()` works from {main} (the coroutine starts at once). A wait from outside
-any coroutine (`await`, `sleep`, `readable`, ...) is wrapped in `Swoole\Coroutine\run()` and the outcome is
-carried out as a value (so a `Timeout` does not escape the scheduler). **`Co\run()` returns only when every
-coroutine has ended.** `Swoole\Event::exit()` can return earlier but destroys the timers of the remaining
-coroutines (they later die with a "deadlock" fatal), so it is not used. Consequently, from {main}:
+Every adapter call happens inside an api `run()`; the outermost `run()` starts with `go()` then `await()` from
+{main}, and that first `await()` is where the adapter wraps the single `Swoole\Coroutine\run()` (the outcome is
+carried out as a value, so a `Timeout` does not escape the scheduler). `Co\run()` returns only when every
+coroutine has ended, so the adapter ends it itself once the work is done. Nested and concurrent `run()`s need no
+special handling: the api keeps its frames per coroutine through `\async\Registry::$executionKey`, which the
+adapter sets to the same provider it gives the Scope polyfill (see Scope).
 
-* a timed-out `await()` does not throw until the leftover tasks have finished, and a task that never ends
-  blocks {main}'s wait forever. **Example 04 therefore fails** (output order: "task finished" before the
-  timeout message). Inside `run()` / a coroutine it behaves correctly (see `AdapterTest`).
+**`service($f)` tasks are cancelled when the outermost `run()` returns** (allowed by the spec: runtime-specific,
+services are restartable). The adapter counts the running `go()` tasks; when the last one ends inside its
+`Co\run()` wrapper it calls `Coroutine::cancel()` on every service coroutine. Cancellation surfaces in the
+adapter's waits (`Coroutine::sleep`, `Channel::pop`, which the stream waits and awaits use) as an exception
+implementing `async\CancelledException` (`FiberInterop\Swoole\Cancelled`); the service coroutine swallows it and
+ends cleanly, so `Co\run()` returns without warnings. A service that catches the exception and keeps going
+would keep `Co\run()` open. A service that fails with nobody awaiting it is reported by Swoole as a fatal error
+(stderr, non-zero exit); before rethrowing, the adapter closes every channel with a blocked consumer so Swoole
+prints no `Channel::~Channel() ... consumers will be discarded` warning on stdout.
+
 * the CLI's default hook flags include curl hooks; if ext-curl is absent Swoole warns on stdout, so the
   adapter removes the curl flags from `hook_flags` in that case.
 
@@ -74,5 +83,5 @@ would need `class_alias`es; expect differences in `waitEvent` semantics.
 
 ## Tests
 
-`vendor/bin/phpunit` (with the extension loaded): `ConformanceTest` runs the api examples (all 17 examples), `AdapterTest` covers repeatable awaits, concurrent awaiters, timeouts, stream multiplexing and
-per-coroutine scope.
+`vendor/bin/phpunit` (with the extension loaded): `ConformanceTest` runs the api examples (all 20 examples), `AdapterTest` covers repeatable awaits, concurrent awaiters, timeouts, stream multiplexing,
+service cancellation, nested `run()` in two coroutines and per-coroutine scope.

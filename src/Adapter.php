@@ -11,13 +11,20 @@ use Swoole\Coroutine\Channel;
 use Swoole\Coroutine\System;
 
 /**
- * fiber-interop/api on Swoole coroutines. See README.md for the {main}, Fiber and Scope semantics.
+ * fiber-interop/api on Swoole coroutines. See README.md for the run(), service, Fiber and Scope semantics.
  */
 final class Adapter implements \async\Adapter
 {
     /** @var array<string, array{cid: int, waiters: array<int, Channel>}> stream wait groups, key "<resource id>:<r|w>" */
     private array $streams = [];
     private int $nextWaiter = 0;
+    /** @var array<int, int> cids of service() coroutines */
+    private array $services = [];
+    /** go() tasks still running; when it reaches 0 inside our Co\run() wrapper the run is over */
+    private int $live = 0;
+    private int $wrapDepth = 0;
+    /** @var array<int, Channel> channels with a blocked consumer, closed before an unhandled error ends the process */
+    private static array $waiting = [];
 
     public function __construct()
     {
@@ -31,24 +38,80 @@ final class Adapter implements \async\Adapter
                 static fn(): ?object => Coroutine::getCid() > 0 ? Coroutine::getContext() : null,
             );
         }
+        \async\Registry::$executionKey = static fn(): ?object => Coroutine::getCid() > 0 ? Coroutine::getContext() : null;
+    }
+
+    /**
+     * Pop with a timeout. Returns null on timeout; throws Cancelled when the coroutine was cancelled
+     * or the channel closed (a service being stopped, or the process ending on an unhandled error).
+     */
+    public static function pop(Channel $ch, float $timeout): mixed
+    {
+        $id = \spl_object_id($ch);
+        self::$waiting[$id] = $ch;
+        try {
+            $r = $ch->pop($timeout === \PHP_FLOAT_MAX ? -1 : \max(0.0001, $timeout));
+        } finally {
+            unset(self::$waiting[$id]);
+        }
+        if ($r === false) {
+            if ($ch->errCode !== \SWOOLE_CHANNEL_TIMEOUT) {
+                throw new Cancelled('Cancelled');
+            }
+            return null;
+        }
+        return $r;
     }
 
     public function go(\Closure $f): object
     {
-        $task = new Task();
         $scope = \Scope::getCurrent();
-        Coroutine::create(function () use ($f, $task, $scope): void {
+        return $this->spawn(static fn() => $scope->run($f), false);
+    }
+
+    /** Services are cancelled when the outermost run() returns; they are restartable by contract. */
+    public function service(\Closure $f): object
+    {
+        return $this->spawn($f, true);
+    }
+
+    private function spawn(\Closure $f, bool $service): Task
+    {
+        $task = new Task();
+        $service || $this->live++;
+        $cid = Coroutine::create(function () use ($f, $task, $service): void {
+            $cid = Coroutine::getCid();
+            $service && $this->services[$cid] = $cid;
             try {
-                $task->settle(true, $scope->run($f));
+                $task->settle(true, $f());
+            } catch (Cancelled $e) {
+                $task->settle(false, $e);
             } catch (\Throwable $e) {
                 $task->settle(false, $e);
                 Coroutine::sleep(0.001); // give an awaiter one tick to claim the failure
                 if (!$task->handled) {
-                    throw $e; // Swoole reports it as a fatal error: stderr and non-zero exit
+                    // Swoole reports it as a fatal error: stderr and non-zero exit. Wake blocked
+                    // consumers first so no Channel is destroyed with a waiter (a stdout warning).
+                    foreach (self::$waiting as $ch) {
+                        $ch->close();
+                    }
+                    throw $e;
+                }
+            } finally {
+                unset($this->services[$cid]);
+                if (!$service && --$this->live === 0 && $this->wrapDepth > 0) {
+                    $this->cancelServices();
                 }
             }
         });
         return $task;
+    }
+
+    private function cancelServices(): void
+    {
+        foreach ($this->services as $cid) {
+            Coroutine::cancel($cid);
+        }
     }
 
     public function canAwait(object $o): bool
@@ -75,9 +138,11 @@ final class Adapter implements \async\Adapter
                 static fn($v) => $settle(true, $v),
                 static fn($r) => $settle(false, $r instanceof \Throwable ? $r : new RejectedException($r)),
             );
-            $r = $ch->pop($timeout === \PHP_FLOAT_MAX ? -1 : \max(0.0001, $timeout));
-            $done = true; // a later result is ignored
-            return $r === false ? null : $r;
+            try {
+                return self::pop($ch, $timeout);
+            } finally {
+                $done = true; // a later result is ignored
+            }
         }, $timeout);
     }
 
@@ -122,31 +187,37 @@ final class Adapter implements \async\Adapter
                 });
             }
             $this->streams[$key]['waiters'][$id] = $ch;
-            $r = $ch->pop($timeout === \PHP_FLOAT_MAX ? -1 : \max(0.0001, $timeout));
-            if ($r === false && isset($this->streams[$key])) {
-                unset($this->streams[$key]['waiters'][$id]);
-                if (!$this->streams[$key]['waiters']) {
-                    $cid = $this->streams[$key]['cid'];
-                    unset($this->streams[$key]);
-                    Coroutine::cancel($cid);
+            try {
+                return self::pop($ch, $timeout);
+            } finally {
+                // left by timeout or cancellation: the last waiter out stops the poller
+                if (isset($this->streams[$key]['waiters'][$id])) {
+                    unset($this->streams[$key]['waiters'][$id]);
+                    if (!$this->streams[$key]['waiters']) {
+                        $cid = $this->streams[$key]['cid'];
+                        unset($this->streams[$key]);
+                        Coroutine::cancel($cid);
+                    }
                 }
             }
-            return $r === false ? null : $r;
         }, $timeout);
     }
 
     /**
      * Run $body (blocks on a channel; returns [ok, value], or null on timeout) inside a coroutine.
-     * From {main} or a Fiber outside any coroutine a Co\run() scheduler is started for it and the
-     * outcome is carried out as a value, so a Timeout does not escape the scheduler.
-     * Co\run() returns only when every coroutine has ended.
+     * Outside any coroutine (the outermost run()'s first await, or a foreign Fiber) the single Co\run()
+     * wrapper is started for it and the outcome is carried out as a value, so a Timeout does not escape
+     * the scheduler. Co\run() returns only when every coroutine has ended; services are cancelled once
+     * the last go() task has.
      */
     private function wait(\Closure $body, float $timeout, ?float $sleep = null): mixed
     {
         $run = function () use ($body, $timeout, $sleep): array {
             try {
                 if ($sleep !== null) {
-                    Coroutine::sleep(\max(0.001, $sleep));
+                    if (Coroutine::sleep(\max(0.001, $sleep)) === false) {
+                        throw new Cancelled('Cancelled');
+                    }
                     $r = [true, null];
                 } else {
                     $r = $body() ?? [false, new Timeout(\sprintf('Timed out after %.3fs', $timeout))];
@@ -160,9 +231,15 @@ final class Adapter implements \async\Adapter
             [$ok, $value] = $run();
         } else {
             $out = null;
-            \Swoole\Coroutine\run(static function () use ($run, &$out): void {
-                $out = $run();
-            });
+            $this->wrapDepth++;
+            try {
+                \Swoole\Coroutine\run(function () use ($run, &$out): void {
+                    $out = $run();
+                    $this->live === 0 && $this->cancelServices();
+                });
+            } finally {
+                $this->wrapDepth--;
+            }
             [$ok, $value] = $out;
         }
         if (!$ok) {

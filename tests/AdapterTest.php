@@ -49,12 +49,6 @@ final class AdapterTest extends TestCase
         }));
     }
 
-    public function testTimeoutFromMain(): void
-    {
-        $this->expectException(\async\Timeout::class);
-        await(go(fn() => sleep(0.05)), 0.01);
-    }
-
     public function testConcurrentStreamWaitersAndTimeout(): void
     {
         [$r, $w] = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
@@ -68,7 +62,38 @@ final class AdapterTest extends TestCase
         $this->assertSame(2, $n);
         fread($r, 10);
         $this->expectException(\async\Timeout::class);
-        readable($r, 0.01);
+        run(fn() => readable($r, 0.01));
+    }
+
+    public function testServicesAreCancelledWhenOutermostRunReturns(): void
+    {
+        $log = [];
+        $t = microtime(true);
+        run(function () use (&$log) {
+            \async\service(function () use (&$log) {
+                try {
+                    sleep(5);
+                } catch (\async\CancelledException) {
+                    $log[] = 'cancelled';
+                }
+            });
+            sleep(0.01);
+            $log[] = 'f done';
+        });
+        $this->assertSame(['f done', 'cancelled'], $log);
+        $this->assertLessThan(1.0, microtime(true) - $t);
+    }
+
+    public function testTwoCoroutinesEachDoTheirOwnNestedRun(): void
+    {
+        $r = run(function () {
+            $mk = fn(string $n, float $d) => go(fn() => run(function () use ($n, $d) {
+                $inner = go(function () use ($n, $d) { sleep($d); return $n; });
+                return await($inner) . '!';
+            }));
+            return await_all([$mk('a', 0.03), $mk('b', 0.01)]);
+        });
+        $this->assertSame(['a!', 'b!'], $r);
     }
 
     public function testScopeStackIsPerCoroutine(): void
