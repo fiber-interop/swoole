@@ -13,3 +13,9 @@ if (\extension_loaded('swoole') || \extension_loaded('openswoole')) {
 if (\defined('SWOOLE_HOOK_NATIVE_CURL') && (\SWOOLE_HOOK_ALL & \SWOOLE_HOOK_NATIVE_CURL) && \extension_loaded('curl') && \interface_exists(\async\curl\Driver::class)) {
     \async\curl\Registry::$candidates['fiber-interop/swoole'] = static fn() => new \FiberInterop\Swoole\CurlDriver();
 }
+
+// Native async\mysqli driver: SWOOLE_HOOK_TCP (part of the SWOOLE_HOOK_ALL the adapter sets) hooks
+// PHP stream sockets, which mysqlnd uses, so mysqli::query() is cooperative inside a coroutine.
+if ((\extension_loaded('swoole') || \extension_loaded('openswoole')) && \extension_loaded('mysqli') && \interface_exists(\async\mysqli\Driver::class)) {
+    \async\mysqli\Registry::$candidates['fiber-interop/swoole'] = static fn() => new \FiberInterop\Swoole\MysqliDriver();
+}
