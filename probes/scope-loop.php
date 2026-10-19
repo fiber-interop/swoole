@@ -1,5 +1,5 @@
 <?php
-// Runtime-specific: the same scenario with Swoole's own primitives (Coroutine::create + a native sleep), no async\
+// Runtime-specific: the same scenario with Swoole's own primitives (Coroutine::create + a native sleep), no fiber\
 // API except run() to start the loop. Swoole resumes a coroutine itself after the sleep, where the adapter has no
 // hook, so this is EXPECTED to fail: the resumed coroutine sees the scope that was active last.
 // See README "Scope state". Prints what it observed and exits 1 on any mismatch.
@@ -10,7 +10,7 @@ use Swoole\Coroutine\Channel;
 
 $bad = [];
 $root = $_GET;
-\async\run(function () use (&$bad) {
+\fiber\run(function () use (&$bad) {
     $done = new Channel(2);
     foreach (['a', 'b'] as $name) {
         (new Scope())->run(function () use ($name, $done, &$bad) {

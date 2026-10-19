@@ -2,7 +2,7 @@
 // Portable: a plain Fiber inside a scope, suspended with bare Fiber::suspend(), sees the creator's $_GET.
 require __DIR__ . '/_boot.php';
 
-use function async\run;
+use function fiber\run;
 
 $bad = [];
 run(function () use (&$bad) {

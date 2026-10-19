@@ -4,8 +4,8 @@ declare(strict_types=1);
 
 namespace FiberInterop\Swoole;
 
-use async\RejectedException;
-use async\Timeout;
+use fiber\RejectedException;
+use fiber\Timeout;
 use Swoole\Coroutine;
 use Swoole\Coroutine\Channel;
 use Swoole\Coroutine\System;
@@ -13,7 +13,7 @@ use Swoole\Coroutine\System;
 /**
  * fiber-interop/api on Swoole coroutines. See README.md for the run(), service, Fiber and Scope semantics.
  */
-final class Adapter implements \async\Adapter
+final class Adapter implements \fiber\Adapter
 {
     /** Seconds one System::waitEvent() poll lasts; an unwatched poller exits, and a locally closed stream is noticed, within this time. */
     private const POLL_SLICE = 0.01;
@@ -68,7 +68,7 @@ final class Adapter implements \async\Adapter
                 static fn(): ?object => Coroutine::getCid() > 0 ? Coroutine::getContext() : null,
             );
         }
-        \async\Registry::$executionKey = static fn(): ?object => Coroutine::getCid() > 0 ? Coroutine::getContext() : null;
+        \fiber\Registry::$executionKey = static fn(): ?object => Coroutine::getCid() > 0 ? Coroutine::getContext() : null;
     }
 
     /**

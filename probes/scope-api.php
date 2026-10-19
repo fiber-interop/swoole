@@ -1,8 +1,8 @@
 <?php
-// Portable: two scopes, interleaving tasks through async\sleep(); each must keep seeing its own $_GET.
+// Portable: two scopes, interleaving tasks through fiber\sleep(); each must keep seeing its own $_GET.
 require __DIR__ . '/_boot.php';
 
-use function async\{go, await_all, run, sleep};
+use function fiber\{go, await_all, run, sleep};
 
 $bad = [];
 $root = $_GET;

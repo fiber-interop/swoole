@@ -1,6 +1,6 @@
 # fiber-interop/swoole
 
-Adapter that runs the [`fiber-interop/api`](../api) functions (`async\go`, `await`, `await_all`, `await_any`,
+Adapter that runs the [`fiber-interop/api`](../api) functions (`fiber\go`, `await`, `await_all`, `await_any`,
 `run`, `sleep`, `readable`, `writable`) on Swoole coroutines, so a library written against the api runs
 unchanged for Swoole users.
 
@@ -22,8 +22,8 @@ PHP 8.5 (`phpize && ./configure && make`).
 | api | Swoole |
 |---|---|
 | `go($f)` | `Coroutine::create()`; returns a `Task` (result/exception stored, `then()` for other loops). Body runs in the captured `Scope`. |
-| `await(Task)` | per-waiter `Channel(1)` fed when the task settles; `pop($timeout)` false -> `async\Timeout`, the task keeps running. Repeatable: the outcome is stored on the Task, never consumed. |
-| `await(thenable)` | `then()` + channel, `$done` guard, non-Throwable rejection -> `async\RejectedException`, exceptions rethrown unchanged |
+| `await(Task)` | per-waiter `Channel(1)` fed when the task settles; `pop($timeout)` false -> `fiber\Timeout`, the task keeps running. Repeatable: the outcome is stored on the Task, never consumed. |
+| `await(thenable)` | `then()` + channel, `$done` guard, non-Throwable rejection -> `fiber\RejectedException`, exceptions rethrown unchanged |
 | `sleep()` | `Coroutine::sleep()` (clamped to Swoole's 1 ms minimum) |
 | `readable()/writable()` | `System::waitEvent()`; it allows one waiter per fd and mode (a second gets `EEXIST`), so the adapter runs one poller coroutine per fd+mode and fans out to per-waiter channels; the poller is cancelled when the last waiter times out |
 | `service($f)` | `Coroutine::create()` tracked as a service; cancelled with `Coroutine::cancel()` when the outermost `run()` returns |
@@ -35,14 +35,14 @@ Every adapter call happens inside an api `run()`; the outermost `run()` starts w
 {main}, and that first `await()` is where the adapter wraps the single `Swoole\Coroutine\run()` (the outcome is
 carried out as a value, so a `Timeout` does not escape the scheduler). `Co\run()` returns only when every
 coroutine has ended, so the adapter ends it itself once the work is done. Nested and concurrent `run()`s need no
-special handling: the api keeps its frames per coroutine through `\async\Registry::$executionKey`, which the
+special handling: the api keeps its frames per coroutine through `\fiber\Registry::$executionKey`, which the
 adapter sets to the same provider it gives the Scope polyfill (see Scope).
 
 **`service($f)` tasks are cancelled when the outermost `run()` returns** (allowed by the spec: runtime-specific,
 services are restartable). The adapter counts the running `go()` tasks; when the last one ends inside its
 `Co\run()` wrapper it calls `Coroutine::cancel()` on every service coroutine. Cancellation surfaces in the
 adapter's waits (`Coroutine::sleep`, `Channel::pop`, which the stream waits and awaits use) as an exception
-implementing `async\CancelledException` (`FiberInterop\Swoole\Cancelled`); the service coroutine swallows it and
+implementing `fiber\CancelledException` (`FiberInterop\Swoole\Cancelled`); the service coroutine swallows it and
 ends cleanly, so `Co\run()` returns without warnings. A service that catches the exception and keeps going
 would keep `Co\run()` open. A service that fails with nobody awaiting it is reported by Swoole as a fatal error
 (stderr, non-zero exit); before rethrowing, the adapter closes every channel with a blocked consumer so Swoole
@@ -84,9 +84,9 @@ outermost `run()` returns to {main}. It is a single comparison when the scope is
 
 Probes (`php probes/<name>.php`, exit 0 and `ok` on success; same results on Swoole 6.3 and OpenSwoole 26.2):
 
-- `scope-api.php` passes: two scopes interleaving through `async\sleep()` keep their own `$_GET`; the root value is back after `run()`.
+- `scope-api.php` passes: two scopes interleaving through `fiber\sleep()` keep their own `$_GET`; the root value is back after `run()`.
 - `scope-raw-fiber.php` passes: a plain `Fiber` inside a scope sees its creator's `$_GET` (the polyfill's "most recently current" fallback).
-- `scope-loop.php` FAILS, as expected: with `Coroutine::create` + a native sleep (no `async\` call), a coroutine that
+- `scope-loop.php` FAILS, as expected: with `Coroutine::create` + a native sleep (no `fiber\` call), a coroutine that
   Swoole itself resumes sees the superglobals of whatever scope was active last (here the root, `[]`), not its own.
 
 What was checked for a hook: `Coroutine::set()` options, `Coroutine::defer()` (runs at coroutine exit only) and the
