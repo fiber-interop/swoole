@@ -13,6 +13,9 @@ use Swoole\Coroutine\Channel;
 final class Task
 {
     public bool $handled = false;
+    /** The channel the task's coroutine is blocked on now, for fiber\cancel(). */
+    public ?Channel $waiting = null;
+    public ?\Throwable $cancelReason = null;
     private ?array $result = null;
     /** @var list<\Closure> */
     private array $listeners = [];

@@ -27,6 +27,8 @@ final class Adapter implements \fiber\Adapter
     private int $wrapDepth = 0;
     /** @var array<int, Channel> channels with a blocked consumer, closed before an unhandled error ends the process */
     private static array $waiting = [];
+    /** @var array<int, Task> the go()/service() task running in each coroutine, by cid */
+    private static array $tasks = [];
 
     /**
      * Swoole: Co\run(). OpenSwoole has no Co\run function, and its Coroutine::run() refuses to start (and
@@ -79,14 +81,22 @@ final class Adapter implements \fiber\Adapter
     {
         $id = \spl_object_id($ch);
         self::$waiting[$id] = $ch;
+        $task = self::$tasks[Coroutine::getCid()] ?? null;
+        $task && $task->waiting = $ch;
         try {
             $r = $ch->pop($timeout === \PHP_FLOAT_MAX ? -1 : \max(0.001, $timeout));
         } finally {
             unset(self::$waiting[$id]);
+            $task && $task->waiting = null;
             self::activate();
         }
         if ($r === false) {
             if ($ch->errCode !== \SWOOLE_CHANNEL_TIMEOUT) {
+                if ($task && $task->cancelReason !== null) {
+                    $reason = $task->cancelReason; // fiber\cancel(): thrown once, unchanged
+                    $task->cancelReason = null;
+                    throw $reason;
+                }
                 throw new Cancelled('Cancelled');
             }
             return null;
@@ -109,6 +119,20 @@ final class Adapter implements \fiber\Adapter
     {
         $scope = \Scope::getCurrent();
         return $this->spawn(static fn() => $scope->run($f), false);
+    }
+
+    public function current(): ?object
+    {
+        return self::$tasks[Coroutine::getCid()] ?? null;
+    }
+
+    /** fiber\cancel(): the task's wait ends by closing the channel it pops; pop() throws $reason from it. */
+    public function cancel(object $task, \fiber\CancelledException $reason): void
+    {
+        if ($task instanceof Task && $task->waiting !== null) {
+            $task->cancelReason = $reason;
+            $task->waiting->close();
+        }
     }
 
     /** Services are cancelled when the outermost run() returns; they are restartable by contract. */
@@ -150,6 +174,7 @@ final class Adapter implements \fiber\Adapter
             self::activate();
             $captured = $this->captureOutput();
             $cid = Coroutine::getCid();
+            self::$tasks[$cid] = $task; // from the first line, so current() answers before the first wait
             $service && $this->services[$cid] = $cid;
             try {
                 $task->settle(true, $f());
@@ -167,7 +192,7 @@ final class Adapter implements \fiber\Adapter
                     throw $e;
                 }
             } finally {
-                unset($this->services[$cid]);
+                unset($this->services[$cid], self::$tasks[$cid]);
                 if (!$service && --$this->live === 0 && $this->wrapDepth > 0) {
                     $this->cancelServices();
                 }
